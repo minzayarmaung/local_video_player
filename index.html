@@ -33,6 +33,10 @@
     .icon-button { width: 36px; height: 36px; display: inline-grid; place-items: center; padding: 0; border: 0; border-radius: 8px; cursor: pointer; color: var(--text); background: transparent; font-size: 17px; }
     .icon-button:hover { background: var(--surface-2); }
     .volume { width: 98px; }
+    .compatibility { margin: 13px 0 0; color: var(--muted); font-size: 12px; }
+    .compatibility .button { min-height: 32px; margin-right: 8px; padding: 0 10px; border-color: var(--line); background: var(--surface-2); font-size: 12px; }
+    .compatibility .button:hover { background: #303849; }
+    .compatibility .button:disabled { cursor: wait; opacity: .72; transform: none; }
     select { margin-left: auto; min-height: 34px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; outline: 0; color: var(--text); background: var(--surface-2); font: inherit; font-size: 13px; cursor: pointer; }
     .error { position: absolute; left: 50%; bottom: 23px; z-index: 4; width: min(92%, 590px); padding: 11px 14px; transform: translateX(-50%); border: 1px solid #914b54; border-radius: 9px; color: #ffdbe0; background: #402129; text-align: center; font-size: 13px; }
     .hidden { display: none !important; }
@@ -71,13 +75,14 @@
         <select id="speed" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
         <button class="icon-button" id="fullscreen" type="button" aria-label="Fullscreen">⛶</button>
       </div>
+      <div class="compatibility"><button class="button" id="compatibilityButton" type="button">Fix audio for Chrome</button><span id="compatibilityStatus">Keeps MP4 video; converts only its audio to browser-compatible AAC.</span></div>
     </section>
   </main>
-  <script>
+  <script type="module">
     const $ = id => document.getElementById(id);
     const video = $('video'), stage = $('stage'), dropzone = $('dropzone'), input = $('fileInput');
     const controls = $('controls'), error = $('error'), fileName = $('fileName');
-    let objectUrl = null;
+    let objectUrl = null, activeFile = null, ffmpeg = null;
     const formatTime = seconds => {
       if (!Number.isFinite(seconds)) return '0:00';
       const h = Math.floor(seconds / 3600);
@@ -87,14 +92,20 @@
     };
     const showError = message => { error.textContent = message; error.classList.remove('hidden'); };
     const clearError = () => error.classList.add('hidden');
+    function setSource(url, name) {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = url;
+      video.src = objectUrl;
+      video.load();
+      fileName.textContent = name;
+    }
     function loadFile(file) {
       if (!file) return;
       if (!file.type.startsWith('video/') && !/\.(mp4|webm|ogv|ogg|mkv|avi)$/i.test(file.name)) { showError('Please select a video file.'); return; }
       clearError();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      objectUrl = URL.createObjectURL(file);
-      video.src = objectUrl; video.load();
-      fileName.textContent = file.name;
+      activeFile = file;
+      $('compatibilityStatus').textContent = 'Keeps MP4 video; converts only its audio to browser-compatible AAC.';
+      setSource(URL.createObjectURL(file), file.name);
     }
     $('browseButton').onclick = () => input.click();
     input.onchange = e => loadFile(e.target.files[0]);
@@ -137,6 +148,44 @@
     $('muteButton').onclick = () => { video.muted = !video.muted; updateMute(); };
     $('speed').onchange = e => video.playbackRate = Number(e.target.value);
     $('fullscreen').onclick = () => document.fullscreenElement ? document.exitFullscreen() : stage.requestFullscreen();
+    const setCompatibilityStatus = message => $('compatibilityStatus').textContent = message;
+    async function getFFmpeg() {
+      if (ffmpeg) return ffmpeg;
+      setCompatibilityStatus('Downloading the one-time audio compatibility engine…');
+      const [{ FFmpeg }, { toBlobURL, fetchFile }] = await Promise.all([
+        import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js'),
+        import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js')
+      ]);
+      ffmpeg = new FFmpeg();
+      ffmpeg.on('progress', ({ progress }) => setCompatibilityStatus(`Converting audio… ${Math.min(100, Math.round(progress * 100))}%`));
+      const coreBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+      await ffmpeg.load({
+        coreURL: await toBlobURL(`${coreBase}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, 'application/wasm')
+      });
+      return ffmpeg;
+    }
+    $('compatibilityButton').onclick = async () => {
+      if (!activeFile) return;
+      const button = $('compatibilityButton');
+      button.disabled = true;
+      try {
+        const engine = await getFFmpeg();
+        setCompatibilityStatus('Preparing your video…');
+        await engine.writeFile('input-video', new Uint8Array(await activeFile.arrayBuffer()));
+        // Video is stream-copied; only the audio track is converted to AAC.
+        await engine.exec(['-i', 'input-video', '-map', '0:v:0?', '-map', '0:a:0?', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', 'browser-compatible.mp4']);
+        const data = await engine.readFile('browser-compatible.mp4');
+        const converted = new File([data.buffer], activeFile.name.replace(/\.[^.]+$/, '') + '-chrome.mp4', { type: 'video/mp4' });
+        activeFile = converted;
+        setSource(URL.createObjectURL(converted), converted.name);
+        setCompatibilityStatus('Done — playing the MP4 with browser-compatible AAC audio.');
+      } catch (err) {
+        console.error(err);
+        showError('The audio compatibility conversion could not run. Check your connection, then try again with a smaller video.');
+        setCompatibilityStatus('Conversion unavailable.');
+      } finally { button.disabled = false; }
+    };
     document.addEventListener('keydown', e => { if (e.target.matches('input, select')) return; if (e.code === 'Space' && video.src) { e.preventDefault(); video.paused ? playWithSound() : video.pause(); } if (e.key.toLowerCase() === 'f' && video.src) $('fullscreen').click(); });
     window.addEventListener('beforeunload', () => objectUrl && URL.revokeObjectURL(objectUrl));
   </script>
