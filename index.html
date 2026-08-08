@@ -78,7 +78,13 @@
     const video = $('video'), stage = $('stage'), dropzone = $('dropzone'), input = $('fileInput');
     const controls = $('controls'), error = $('error'), fileName = $('fileName');
     let objectUrl = null;
-    const formatTime = seconds => { if (!Number.isFinite(seconds)) return '0:00'; const m = Math.floor(seconds / 60); const s = Math.floor(seconds % 60).toString().padStart(2, '0'); return `${m}:${s}`; };
+    const formatTime = seconds => {
+      if (!Number.isFinite(seconds)) return '0:00';
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+      return h ? `${h}:${m.toString().padStart(2, '0')}:${s}` : `${m}:${s}`;
+    };
     const showError = message => { error.textContent = message; error.classList.remove('hidden'); };
     const clearError = () => error.classList.add('hidden');
     function loadFile(file) {
@@ -111,12 +117,17 @@
     video.addEventListener('timeupdate', () => { const p = video.duration ? video.currentTime / video.duration * 100 : 0; $('progress').value = p; $('time').textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`; });
     video.addEventListener('play', () => { $('playButton').textContent = '❚❚'; $('playButton').ariaLabel = 'Pause'; });
     video.addEventListener('pause', () => { $('playButton').textContent = '▶'; $('playButton').ariaLabel = 'Play'; });
-    const playWithSound = () => {
+    const playWithSound = async () => {
       video.muted = false;
       video.defaultMuted = false;
       if (video.volume === 0) { video.volume = 1; $('volume').value = 1; }
       updateMute();
-      return video.play().catch(() => showError('Playback was blocked by the browser. Click Play again, then check that this tab is not muted.'));
+      try {
+        await video.play();
+        clearError();
+      } catch (err) {
+        showError(`Sound playback was blocked by this browser (${err.name}). Check that the Vercel site/tab is not muted, then press Play again.`);
+      }
     };
     $('playButton').onclick = () => video.paused ? playWithSound() : video.pause();
     video.ondblclick = () => document.fullscreenElement ? document.exitFullscreen() : stage.requestFullscreen();
